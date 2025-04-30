@@ -1,7 +1,6 @@
 from flask import Flask
 from flask_sock import Sock
 import asyncio
-import websockets
 import json
 import base64
 import uuid
