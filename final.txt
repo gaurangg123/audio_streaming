@@ -1,0 +1,328 @@
+import asyncio
+import websockets
+import json
+import base64
+import ffmpeg
+import uuid
+import threading
+import time
+
+# List of audio URLs with metadata
+AUDIO_URLS = [
+    {
+        "url": "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/REaf0c60c181e2f36b0be8a20c80056767",
+        "callerid": "+1234567890",
+        "duration": 300,
+        "sid": "CA1234567890abcdef",
+        "transcript": "Hello, this is a test call.",
+        "sentiment": "positive"
+    },
+    {
+        "url": "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/RE3c3626c64b2ef45e00eb9ebf04dcd529",
+        "callerid": "+1987654321",
+        "duration": 150,
+        "sid": "CAabcdef1234567890",
+        "transcript": "This is another test call.",
+        "sentiment": "negative"
+    },
+     {
+        "url": "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/REaf0c60c181e2f36b0be8a20c80056767",
+        "callerid": "+1234567890",
+        "duration": 300,
+        "sid": "CA1234567890abcdef",
+        "transcript": "Hello, this is a test call.",
+        "sentiment": "positive"
+    },
+    {
+        "url": "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/RE3c3626c64b2ef45e00eb9ebf04dcd529",
+        "callerid": "+1987654321",
+        "duration": 150,
+        "sid": "CAabcdef1234567890",
+        "transcript": "This is another test call.",
+        "sentiment": "negative"
+    }, {
+        "url": "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/REaf0c60c181e2f36b0be8a20c80056767",
+        "callerid": "+1234567890",
+        "duration": 300,
+        "sid": "CA1234567890abcdef",
+        "transcript": "Hello, this is a test call.",
+        "sentiment": "positive"
+    },
+    {
+        "url": "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/RE3c3626c64b2ef45e00eb9ebf04dcd529",
+        "callerid": "+1987654321",
+        "duration": 150,
+        "sid": "CAabcdef1234567890",
+        "transcript": "This is another test call.",
+        "sentiment": "negative"
+    },
+     {
+        "url": "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/REaf0c60c181e2f36b0be8a20c80056767",
+        "callerid": "+1234567890",
+        "duration": 300,
+        "sid": "CA1234567890abcdef",
+        "transcript": "Hello, this is a test call.",
+        "sentiment": "positive"
+    },
+    {
+        "url": "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/RE3c3626c64b2ef45e00eb9ebf04dcd529",
+        "callerid": "+1987654321",
+        "duration": 150,
+        "sid": "CAabcdef1234567890",
+        "transcript": "This is another test call.",
+        "sentiment": "negative"
+    },
+]
+
+async def send_flags_to_frontend(ws, message_queue, audio_info, flags):
+    """ Sends flags to the frontend for a particular audio. """
+    await message_queue.put({
+        "type": "flags",
+        "audio_info": audio_info,
+        "flags": flags
+    })
+
+async def stream_audio_thread(ws, audio, audio_id, message_queue):
+    """ Streams an audio file as base64 chunks and puts messages in the queue. """
+    try:
+        audio_uuid = str(uuid.uuid4())
+        audio_info = {
+            "audio_id": audio_id,
+            "audio_uuid": audio_uuid,
+            "callerid": audio["callerid"],
+            "duration": audio["duration"],
+            "sid": audio["sid"],
+        }
+
+        print(f"[START] Streaming {audio['sid']} with UUID: {audio_uuid}")
+        await message_queue.put({"type": "start", "audio_info": audio_info})
+
+        # Calculate number of flags based on the duration and chunk size
+        flag_interval = 30  # Example flag interval (in seconds)
+        total_flags = int(audio["duration"] // flag_interval) + 1  # Including the start flag
+
+        # Generate the flags for frontend
+        flags = []
+        for flag_number in range(1, total_flags + 1):
+            # Determine flag type
+            if flag_number == 1:
+                flag_type = "Starting Flag"
+            elif flag_number == total_flags:
+                flag_type = "Ending Flag"
+            else:
+                flag_type = "Intermediate Flag"
+
+            flags.append({
+                "flag_number": flag_number,
+                "total_flags": total_flags,
+                "flag_type": flag_type
+            })
+
+        # Send flags to the frontend
+        await send_flags_to_frontend(ws, message_queue, audio_info, flags)
+
+        # Start streaming the audio
+        process = (
+            ffmpeg.input(audio["url"])
+            .output('pipe:', format='wav', acodec='pcm_s16le')
+            .run_async(pipe_stdout=True, pipe_stderr=True, quiet=True)
+        )
+
+        chunk_counter = 0
+        while True:
+            chunk = process.stdout.read(4096)
+            if not chunk:
+                break
+
+            encoded_chunk = base64.b64encode(chunk).decode('utf-8')
+            await message_queue.put({
+                "type": "audio_chunk",
+                "audio_info": audio_info,
+                "audio_data": encoded_chunk
+            })
+
+            chunk_counter += 1
+
+        process.wait()
+        print(f"[COMPLETE] Streaming {audio['sid']} completed.")
+        await message_queue.put({"type": "stream_complete", "audio_info": audio_info})
+
+    except Exception as e:
+        print(f"[ERROR] Streaming audio {audio['sid']}: {e}")
+        await message_queue.put({"type": "error", "audio_info": audio_info, "message": str(e)})
+
+async def send_messages(websocket, message_queue):
+    """ Sends messages from the queue to the WebSocket client. """
+    try:
+        while True:
+            message = await message_queue.get()
+            if message is None:
+                break
+            await websocket.send(json.dumps(message))
+    except websockets.exceptions.ConnectionClosed:
+        print("[INFO] Client disconnected.")
+
+async def handle_connection(websocket):
+    """ Handles WebSocket connections and starts multiple audio streams in threads. """
+    message_queue = asyncio.Queue()
+
+    # Start a task to send messages from the queue
+    send_task = asyncio.create_task(send_messages(websocket, message_queue))
+
+    try:
+        # Send audio URLs to the frontend
+        await message_queue.put({
+            "type": "audio_urls",
+            "urls": [audio["url"] for audio in AUDIO_URLS]
+        })
+
+        # Start threads for each audio
+        threads = []
+        for idx, audio in enumerate(AUDIO_URLS):
+            thread = threading.Thread(target=lambda: asyncio.run(stream_audio_thread(websocket, audio, idx, message_queue)))
+            thread.start()
+            threads.append(thread)
+
+        # Wait for all threads to finish
+        for thread in threads:
+            thread.join()
+
+    except websockets.exceptions.ConnectionClosed:
+        print("[INFO] Client disconnected, stopping audio streaming.")
+
+    finally:
+        await message_queue.put(None)  # Signal send_messages to exit
+        await send_task  # Ensure message sending task completes
+        print("[INFO] WebSocket connection closed.")
+
+async def main():
+    """ Starts the WebSocket server. """
+    print("Starting WebSocket server on ws://localhost:5000")
+    async with websockets.serve(handle_connection, "localhost", 5000):
+        await asyncio.Future()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Audio Stream</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; background-color: #f4f4f4; }
+        h1 { text-align: center; color: #333; }
+        #audioContainer { margin-top: 30px; }
+        .audio-item { background-color: #fff; border: 1px solid #ddd; border-radius: 5px; margin: 15px 0; padding: 20px; box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1); }
+        .audio-header { background-color: #007BFF; color: white; padding: 10px; font-size: 18px; text-align: center; border-radius: 5px 5px 0 0; }
+        .audio-content { margin-top: 15px; }
+        .flag { background-color: #f7f7f7; padding: 10px; margin: 10px 0; border-radius: 4px; border: 1px solid #ddd; white-space: pre-wrap; }
+        .start { background-color: #d1ffd6; }
+        .media { background-color: #d6e0ff; }
+        .stop { background-color: #ffd6d6; }
+        .flag-title { font-weight: bold; margin-bottom: 5px; }
+    </style>
+</head>
+<body>
+
+<h1>WebSocket Audio Stream</h1>
+<p>Listening to audio stream events...</p>
+
+<div id="audioContainer"></div>
+
+<script>
+const wsUrl = "ws://localhost:5000";
+const socket = new WebSocket(wsUrl);
+const audioContainer = document.getElementById("audioContainer");
+const audioSessions = {}; // Store sessions with ordered flags
+
+socket.onopen = () => console.log("Connected to WebSocket server.");
+
+socket.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    console.log("Received:", data);
+
+    if (data.event === 'audio_urls') {
+        displayAudioUrls(data.urls);
+    } else if (['start', 'media', 'flags', 'stop'].includes(data.event)) {
+        storeAudioFlags(data);
+    }
+};
+
+function displayAudioUrls(urls) {
+    urls.forEach(url => {
+        const audioItem = document.createElement("div");
+        audioItem.classList.add("audio-item");
+        audioItem.innerHTML = `<a href="${url}" target="_blank">${url}</a>`;
+        audioContainer.appendChild(audioItem);
+    });
+}
+
+function storeAudioFlags(data) {
+    const sessionId = data.audio_info?.session_id || data.streamSid || "unknown";
+    console.log(`Storing flag for session: ${sessionId}`, data);
+    
+    if (!audioSessions[sessionId]) {
+        audioSessions[sessionId] = { flags: [], rendered: false };
+    }
+    
+    const session = audioSessions[sessionId];
+    
+    // Ensure "start" is stored only once per session
+    if (data.event === "start" && session.flags.some(flag => flag.type === "start")) {
+        return;
+    }
+    
+    session.flags.push({ type: data.event, data });
+    session.flags.sort((a, b) => {
+        const order = { start: 1, media: 2, flags: 3, stop: 4 };
+        return order[a.type] - order[b.type];
+    });
+
+    renderAudioFlags(sessionId, session);
+}
+
+function renderAudioFlags(sessionId, session) {
+    console.log(`Rendering flags for session: ${sessionId}`, session.flags);
+    
+    let audioItem = document.getElementById(`audio-${sessionId}`);
+    if (!audioItem) {
+        audioItem = document.createElement("div");
+        audioItem.classList.add("audio-item");
+        audioItem.id = `audio-${sessionId}`;
+
+        const audioHeader = document.createElement("div");
+        audioHeader.classList.add("audio-header");
+        audioHeader.textContent = `Audio Session: ${sessionId}`;
+
+        const audioContent = document.createElement("div");
+        audioContent.classList.add("audio-content");
+        audioContent.id = `content-${sessionId}`;
+
+        audioItem.appendChild(audioHeader);
+        audioItem.appendChild(audioContent);
+        audioContainer.appendChild(audioItem);
+    }
+
+    const audioContent = document.getElementById(`content-${sessionId}`);
+    audioContent.innerHTML = "";
+
+    session.flags.forEach(flag => {
+        console.log("Adding flag to DOM:", flag);
+        const flagElement = document.createElement("div");
+        flagElement.classList.add("flag", flag.type);
+        flagElement.innerHTML = `
+            <div class="flag-title">${flag.type.toUpperCase()} Event:</div>
+            <div class="flag-details">${JSON.stringify(flag.data, null, 2)}</div>
+        `;
+        audioContent.appendChild(flagElement);
+    });
+}
+</script>
+
+</body>
+</html>

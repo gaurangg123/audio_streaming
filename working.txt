@@ -1,0 +1,136 @@
+import asyncio
+import websockets
+import json
+import base64
+import ffmpeg
+import uuid
+
+# List of audio URLs, now with associated metadata
+AUDIO_URLS = [
+    {
+        "url": "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/REaf0c60c181e2f36b0be8a20c80056767",
+        "callerid": "+1234567890",
+        "duration": 300,
+        "sid": "CA1234567890abcdef",
+        "transcript": "Hello, this is a test call.",
+        "sentiment": "positive"
+    },
+    {
+        "url": "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/RE3c3626c64b2ef45e00eb9ebf04dcd529",
+        "callerid": "+1987654321",
+        "duration": 150,
+        "sid": "CAabcdef1234567890",
+        "transcript": "This is another test call.",
+        "sentiment": "negative"
+    },
+    # Add more audio URLs here with corresponding details...
+    {
+        "url": "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/RE3c3626c64b2ef45e00eb9ebf04dcd529",
+        "callerid": "+1987654321",
+        "duration": 150,
+        "sid": "CAabcdef1234567890",
+        "transcript": "This is another test call.",
+        "sentiment": "negative"
+    },
+    {
+        "url": "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/RE3c3626c64b2ef45e00eb9ebf04dcd529",
+        "callerid": "+1987654321",
+        "duration": 150,
+        "sid": "CAabcdef1234567890",
+        'transcript': "This is another test call.",
+        'sentiment': "negative"
+    },
+    {
+        "url": "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/RE3c3626c64b2ef45e00eb9ebf04dcd529",
+        "callerid": "+1987654321",
+        "duration": 150,
+        "sid": "CAabcdef1234567891",
+        'transcript': "This is another test call.",
+        'sentiment': "negative"
+    },
+]
+
+async def stream_audio(websocket, audio, audio_id):
+    """Streams an audio file as base64 chunks via WebSocket with additional info."""
+    try:
+        # Generate a unique UUID for each audio
+        audio_uuid = str(uuid.uuid4())
+
+        # Include additional info like callerid, duration, sid, etc.
+        audio_info = {
+            "audio_id": audio_id,
+            "audio_uuid": audio_uuid,
+            "callerid": audio["callerid"],
+            "duration": audio["duration"],
+            "sid": audio["sid"],
+        }
+
+        print(f"Streaming {audio['url']} with UUID: {audio_uuid}")
+        process = (
+            ffmpeg.input(audio["url"])
+            .output('pipe:', format='wav', acodec='pcm_s16le')
+            .run_async(pipe_stdout=True, pipe_stderr=True, quiet=True)
+        )
+
+        flag_counter = 0
+        chunk_counter = 0
+
+        while True:
+            chunk = process.stdout.read(4096)
+            if not chunk:
+                break
+
+            encoded_chunk = base64.b64encode(chunk).decode('utf-8')
+
+            # Send audio chunk to frontend
+            await websocket.send(json.dumps({
+                "type": "audio_chunk",
+                "audio_info": audio_info,
+                "audio_data": encoded_chunk
+            }))
+
+            chunk_counter += 1
+
+            # Every 10 chunks, send a flag with additional details
+            if chunk_counter % 10 == 0:
+                flag_counter += 1
+                await websocket.send(json.dumps({
+                    "type": "flag",
+                    "audio_info": audio_info,
+                    "flag_number": flag_counter
+                }))
+
+        process.wait()
+
+        # Notify when stream is complete
+        await websocket.send(json.dumps({
+            "type": "stream_complete",
+            "audio_info": audio_info
+        }))
+
+    except Exception as e:
+        print(f"Error streaming audio {audio['sid']}: {e}")
+        await websocket.send(json.dumps({
+            "type": "error",
+            "audio_info": audio_info,
+            "message": str(e)
+        }))
+
+async def handle_connection(websocket):
+    """Handles WebSocket connection and starts multiple audio streams."""
+    # Send the URLs to the frontend first
+    await websocket.send(json.dumps({
+        "type": "audio_urls",
+        "urls": [audio["url"] for audio in AUDIO_URLS]
+    }))
+
+    tasks = [asyncio.create_task(stream_audio(websocket, audio, idx)) for idx, audio in enumerate(AUDIO_URLS)]
+    await asyncio.gather(*tasks)
+
+async def main():
+    print("Starting WebSocket server on ws://localhost:5000")
+    server = await websockets.serve(handle_connection, "localhost", 5000)
+    await asyncio.Future()  # Keeps the server running
+
+if __name__ == "__main__":
+    asyncio.run(main())

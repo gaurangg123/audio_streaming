@@ -1,0 +1,45 @@
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Streaming</title>
+    <script src="https://cdn.socket.io/4.0.1/socket.io.min.js"></script>
+</head>
+<body>
+    <h1>Audio Streaming</h1>
+    <button onclick="startStreaming()">Start Streaming</button>
+    <audio id="audioPlayer" controls></audio>
+
+    <script>
+        const socket = io('http://localhost:5000/audio_stream');
+
+        socket.on('audio_chunk', (data) => {
+            const audioData = data.data;
+            const flag = data.flag;
+
+            console.log(`Received chunk for session ${data.session_id}. Flag: ${flag}`);
+
+            // Convert base64 to binary
+            const byteCharacters = atob(audioData);
+            const byteArrays = new Uint8Array(byteCharacters.length);
+            for (let i = 0; i < byteCharacters.length; i++) {
+                byteArrays[i] = byteCharacters.charCodeAt(i);
+            }
+
+            // Create a Blob and update the audio player
+            const audioBlob = new Blob([byteArrays], { type: 'audio/wav' });
+            const audioUrl = URL.createObjectURL(audioBlob);
+            const audioPlayer = document.getElementById('audioPlayer');
+            audioPlayer.src = audioUrl;
+        });
+
+        socket.on('stream_complete', (data) => {
+            console.log('Streaming complete:', data.message);
+        });
+
+        function startStreaming() {
+            socket.emit('start_stream', { data: 'start' });
+        }
+    </script>
+</body>
+</html>

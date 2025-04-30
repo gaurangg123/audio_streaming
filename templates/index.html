@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Audio Flags</title>
+    <style>
+        body { font-family: Arial, sans-serif; }
+        .stream-container { border: 2px solid #ddd; padding: 10px; margin: 10px; border-radius: 5px; }
+        .flag { margin-left: 15px; font-weight: bold; }
+        pre { background: #f4f4f4; padding: 10px; border-radius: 5px; white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+
+    <h1>Audio Stream Flags</h1>
+    <div id="streams-container">
+        <h2>Flags for Each Stream</h2>
+    </div>
+
+    <script>
+        const socket = new WebSocket("ws://localhost:5000");
+
+        socket.onopen = function () {
+            console.log("✅ Connected to WebSocket server.");
+        };
+
+        socket.onmessage = function (event) {
+            try {
+                let message = JSON.parse(event.data);
+                console.log("📥 Received WebSocket message:", message);
+
+                const streamSid = message.streamSid || "unknown_stream";
+
+                // Ensure a section exists for this stream
+                let streamDiv = document.getElementById(`stream-${streamSid}`);
+                if (!streamDiv) {
+                    streamDiv = document.createElement("div");
+                    streamDiv.id = `stream-${streamSid}`;
+                    streamDiv.className = "stream-container";
+                    streamDiv.innerHTML = `<h3>🎵 Stream ID: ${streamSid}</h3>`;
+                    document.getElementById("streams-container").appendChild(streamDiv);
+                }
+
+                // Print the flag exactly as received
+                let flagElement = document.createElement("pre");
+                flagElement.className = "flag";
+                flagElement.textContent = JSON.stringify(message, null, 2); // Pretty-print JSON
+                streamDiv.appendChild(flagElement);
+
+            } catch (error) {
+                console.error("❌ Error parsing WebSocket message:", error);
+            }
+        };
+
+        socket.onerror = function (error) {
+            console.error("❌ WebSocket Error:", error);
+        };
+
+        socket.onclose = function () {
+            console.warn("⚠️ WebSocket connection closed.");
+        };
+    </script>
+
+</body>
+</html>

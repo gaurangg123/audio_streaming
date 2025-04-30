@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Audio Stream with Flags</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    .audio-container { margin-top: 30px; padding: 10px; background-color: #f8f8f8; border-radius: 5px; }
+    .flag { margin-top: 10px; padding: 10px; background-color: #e0e0e0; border-radius: 5px; }
+    .flag h4 { margin: 0; }
+    .flag p { margin: 5px 0; }
+    .flag .details { font-size: 0.9em; color: #333; }
+  </style>
+</head>
+<body>
+
+  <h2>Audio Stream with Flags</h2>
+  
+  <div id="audio-streams"></div> <!-- Container for audio streams -->
+
+  <script>
+    const ws = new WebSocket('ws://localhost:5000');
+    const audioChunks = {}; // Object to hold chunks for each audio stream
+    const audioPlayers = {}; // Object to hold the audio player for each stream
+
+    ws.onopen = () => {
+      console.log('Connected to WebSocket server');
+    };
+
+    ws.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+
+      if (message.type === 'audio_urls') {
+        // For each URL, create a separate audio player and flag container
+        const audioUrls = message.urls;
+        const audioStreamsContainer = document.getElementById('audio-streams');
+
+        audioUrls.forEach((url, index) => {
+          // Create the container for each audio stream
+          const streamContainer = document.createElement('div');
+          streamContainer.classList.add('audio-container');
+          streamContainer.id = `audio-${index}`;
+
+          // Add an audio player for this stream
+          const audioPlayer = document.createElement('audio');
+          audioPlayer.controls = true;
+          audioPlayer.id = `audio-player-${index}`;
+          streamContainer.appendChild(audioPlayer);
+
+          // Add a container for flags related to this audio
+          const flagsContainer = document.createElement('div');
+          flagsContainer.id = `flags-container-${index}`;
+          streamContainer.appendChild(flagsContainer);
+
+          // Append the audio stream container to the main container
+          audioStreamsContainer.appendChild(streamContainer);
+
+          // Initialize the chunk storage for this audio
+          audioChunks[index] = [];
+          audioPlayers[index] = audioPlayer;
+        });
+      }
+
+      if (message.type === 'audio_chunk') {
+        const audioData = message.audio_data;
+        const audioInfo = message.audio_info;
+        const audioIndex = audioInfo.audio_id; // Get the stream's index (audio_id corresponds to URL index)
+
+        // Convert base64 audio chunk to binary data
+        const binaryAudioData = atob(audioData);
+        const byteArray = new Uint8Array(binaryAudioData.length);
+
+        // Fill the byte array with binary data
+        for (let i = 0; i < binaryAudioData.length; i++) {
+          byteArray[i] = binaryAudioData.charCodeAt(i);
+        }
+
+        // Push the audio chunk to the array for this audio stream
+        audioChunks[audioIndex].push(byteArray);
+
+        // Create a Blob from the accumulated chunks and set it as the source for the audio player
+        const audioBlob = new Blob(audioChunks[audioIndex], { type: 'audio/wav' });
+        const audioUrl = URL.createObjectURL(audioBlob);
+        audioPlayers[audioIndex].src = audioUrl;
+      }
+
+      if (message.type === 'flag') {
+        const audioInfo = message.audio_info;
+        const flagNumber = message.flag_number;
+        const audioIndex = audioInfo.audio_id; // Get the stream's index (audio_id corresponds to URL index)
+
+        // Create the flag display for this audio stream
+        const flagElement = document.createElement('div');
+        flagElement.classList.add('flag');
+        
+        flagElement.innerHTML = `
+          <h4>Flag ${flagNumber} for Audio ${audioInfo.audio_id} (UUID: ${audioInfo.audio_uuid})</h4>
+          <p><strong>Caller ID:</strong> ${audioInfo.callerid}</p>
+          <p><strong>Duration:</strong> ${audioInfo.duration}s</p>
+          <p><strong>SID:</strong> ${audioInfo.sid}</p>
+          <p class="details"><em>Audio Chunk Info: Flag every 10 chunks.</em></p>
+        `;
+
+        // Append the flag under the relevant audio stream's flags container
+        const flagsContainer = document.getElementById(`flags-container-${audioIndex}`);
+        flagsContainer.appendChild(flagElement);
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+
+    ws.onclose = () => {
+      console.log('Disconnected from WebSocket server');
+    };
+  </script>
+
+</body>
+</html>
+
+
+#backend
+import asyncio
+import websockets
+import json
+import base64
+import ffmpeg
+import uuid
+
+# List of audio URLs, now with associated metadata
+AUDIO_URLS = [
+    {
+        "url": "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/REaf0c60c181e2f36b0be8a20c80056767",
+        "callerid": "+1234567890",
+        "duration": 300,
+        "sid": "CA1234567890abcdef",
+    },
+    {
+        "url": "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/RE3c3626c64b2ef45e00eb9ebf04dcd529",
+        "callerid": "+1987654321",
+        "duration": 150,
+        "sid": "CAabcdef1234567890",
+    },
+    # Add more audio URLs here with corresponding details...
+]
+
+async def stream_audio(websocket, audio, audio_id):
+    """Streams an audio file as base64 chunks via WebSocket with additional info."""
+    try:
+        # Generate a unique UUID for each audio
+        audio_uuid = str(uuid.uuid4())
+
+        # Include additional info like callerid, duration, sid, etc.
+        audio_info = {
+            "audio_id": audio_id,
+            "audio_uuid": audio_uuid,
+            "callerid": audio["callerid"],
+            "duration": audio["duration"],
+            "sid": audio["sid"],
+        }
+
+        print(f"Streaming {audio['url']} with UUID: {audio_uuid}")
+        process = (
+            ffmpeg.input(audio["url"])
+            .output('pipe:', format='wav', acodec='pcm_s16le')
+            .run_async(pipe_stdout=True, pipe_stderr=True, quiet=True)
+        )
+
+        flag_counter = 0
+        chunk_counter = 0
+
+        while True:
+            chunk = process.stdout.read(4096)
+            if not chunk:
+                break
+
+            encoded_chunk = base64.b64encode(chunk).decode('utf-8')
+
+            # Send audio chunk to frontend
+            await websocket.send(json.dumps({
+                "type": "audio_chunk",
+                "audio_info": audio_info,
+                "audio_data": encoded_chunk
+            }))
+
+            chunk_counter += 1
+
+            # Every 10 chunks, send a flag with additional details
+            if chunk_counter % 10 == 0:
+                flag_counter += 1
+                await websocket.send(json.dumps({
+                    "type": "flag",
+                    "audio_info": audio_info,
+                    "flag_number": flag_counter
+                }))
+
+        process.wait()
+
+        # Notify when stream is complete
+        await websocket.send(json.dumps({
+            "type": "stream_complete",
+            "audio_info": audio_info
+        }))
+
+    except Exception as e:
+        print(f"Error streaming audio {audio['sid']}: {e}")
+        await websocket.send(json.dumps({
+            "type": "error",
+            "audio_info": audio_info,
+            "message": str(e)
+        }))
+
+async def handle_connection(websocket):
+    """Handles WebSocket connection and starts multiple audio streams."""
+    # Send the URLs to the frontend first
+    await websocket.send(json.dumps({
+        "type": "audio_urls",
+        "urls": [audio["url"] for audio in AUDIO_URLS]
+    }))
+
+    tasks = [asyncio.create_task(stream_audio(websocket, audio, idx)) for idx, audio in enumerate(AUDIO_URLS)]
+    await asyncio.gather(*tasks)
+
+async def main():
+    print("Starting WebSocket server on ws://localhost:5000")
+    server = await websockets.serve(handle_connection, "localhost", 5000)
+    await asyncio.Future()  # Keeps the server running
+
+if __name__ == "__main__":
+    asyncio.run(main())

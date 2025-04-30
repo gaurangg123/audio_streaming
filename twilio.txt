@@ -1,0 +1,270 @@
+# backend 
+import asyncio
+import websockets
+import json
+import base64
+import ffmpeg
+
+AUDIO_URLS = [
+    "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/REaf0c60c181e2f36b0be8a20c80056767",
+    "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/RE3c3626c64b2ef45e00eb9ebf04dcd529",
+    "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/RE4ad3a85344e5f45dee4dcf0e9d71836e",
+    "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/RE10d700d58bdda79dad7fb3c2099be7a4"
+]
+
+async def stream_audio(websocket, url, audio_id):
+    """Streams an audio file as base64 chunks via WebSocket."""
+    try:
+        print(f"Streaming {url}")
+        process = (
+            ffmpeg.input(url)
+            .output('pipe:', format='wav', acodec='pcm_s16le')
+            .run_async(pipe_stdout=True, pipe_stderr=True, quiet=True)
+        )
+
+        flag_counter = 0
+        chunk_counter = 0
+
+        while True:
+            chunk = process.stdout.read(4096)
+            if not chunk:
+                break
+
+            encoded_chunk = base64.b64encode(chunk).decode('utf-8')
+
+            # Send audio chunk to frontend
+            await websocket.send(json.dumps({
+                "type": "audio_chunk",
+                "audio_id": audio_id,
+                "audio_data": encoded_chunk
+            }))
+
+            chunk_counter += 1
+
+            # Every 10 chunks, send a flag
+            if chunk_counter % 10 == 0:
+                flag_counter += 1
+                await websocket.send(json.dumps({
+                    "type": "flag",
+                    "audio_id": audio_id,
+                    "flag_number": flag_counter
+                }))
+
+        process.wait()
+
+        # Notify when stream is complete
+        await websocket.send(json.dumps({
+            "type": "stream_complete",
+            "audio_id": audio_id
+        }))
+
+    except Exception as e:
+        print(f"Error streaming audio {audio_id}: {e}")
+        await websocket.send(json.dumps({
+            "type": "error",
+            "audio_id": audio_id,
+            "message": str(e)
+        }))
+
+async def handle_connection(websocket):
+    """Handles WebSocket connection and starts multiple audio streams."""
+    # Send the URLs to the frontend first
+    await websocket.send(json.dumps({
+        "type": "audio_urls",
+        "urls": AUDIO_URLS
+    }))
+    
+    tasks = [asyncio.create_task(stream_audio(websocket, url, idx)) for idx, url in enumerate(AUDIO_URLS)]
+    await asyncio.gather(*tasks)
+
+async def main():
+    print("Starting WebSocket server on ws://localhost:5000")
+    server = await websockets.serve(handle_connection, "localhost", 5000)
+    await asyncio.Future()  # Keeps the server running
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+#frontend
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Streamer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+        }
+        .audio-container {
+            margin-bottom: 20px;
+            border: 1px solid #ccc;
+            padding: 10px;
+            border-radius: 8px;
+        }
+        .audio-controls {
+            margin-top: 10px;
+        }
+        .flag-container {
+            display: flex;
+            justify-content: start;
+            gap: 10px;
+        }
+        .flag {
+            color: green;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Audio Streamer</h1>
+
+<div id="audioStreams"></div>
+
+<script>
+    const ws = new WebSocket('ws://localhost:5000');
+    const audioStreamsDiv = document.getElementById('audioStreams');
+    const audioElements = {};
+    const flagCounts = {};
+    let isPlaying = {};
+
+    ws.onopen = () => {
+        console.log("Connected to WebSocket server");
+    };
+
+    ws.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+
+        switch (message.type) {
+            case 'audio_urls':
+                handleAudioURLs(message);
+                break;
+            case 'audio_chunk':
+                handleAudioChunk(message);
+                break;
+            case 'flag':
+                handleFlag(message);
+                break;
+            case 'stream_complete':
+                handleStreamComplete(message);
+                break;
+            case 'error':
+                console.error(`Error in streaming audio ${message.audio_id}: ${message.message}`);
+                break;
+            default:
+                console.log('Unknown message type:', message);
+        }
+    };
+
+    function handleAudioURLs(message) {
+        const urls = message.urls;
+        urls.forEach((url, index) => {
+            const audioId = index;
+
+            // Create container for each audio
+            const audioDiv = document.createElement('div');
+            audioDiv.classList.add('audio-container');
+            audioDiv.id = `audio_${audioId}`;
+            audioDiv.innerHTML = `<strong>Audio ${audioId + 1}</strong><br>`;
+            audioStreamsDiv.appendChild(audioDiv);
+
+            // Create audio element for each URL (native audio player)
+            const audioElement = document.createElement('audio');
+            audioElement.controls = true;  // Enable default HTML5 audio controls
+            audioElement.src = url;
+            audioElement.id = `audio_${audioId}`;
+            audioElement.type = 'audio/wav'; // or the format of the audio you are serving
+            audioElement.onended = () => onAudioEnded(audioId);  // Reset when the audio ends
+            audioElements[audioId] = audioElement;
+
+            // Add the audio element to the container
+            audioDiv.appendChild(audioElement);
+
+            // Create flag container (to hold the flags horizontally)
+            const flagContainer = document.createElement('div');
+            flagContainer.classList.add('flag-container');
+            flagContainer.id = `flagContainer_${audioId}`;
+            audioDiv.appendChild(flagContainer);
+
+            // Initialize the playing state
+            isPlaying[audioId] = false;
+        });
+    }
+
+    function handleAudioChunk(message) {
+        const audioId = message.audio_id;
+        const audioData = message.audio_data;
+        
+        // Convert audio data to Blob and create Object URL
+        const audioBlob = new Blob([new Uint8Array(atob(audioData).split("").map(c => c.charCodeAt(0)))], { type: 'audio/wav' });
+        const audioUrl = URL.createObjectURL(audioBlob);
+        audioElements[audioId].src = audioUrl;
+
+        // Automatically play the audio if not playing
+        if (!isPlaying[audioId]) {
+            audioElements[audioId].play();
+            isPlaying[audioId] = true;
+        }
+    }
+
+    function handleFlag(message) {
+        const audioId = message.audio_id;
+        const flagNumber = message.flag_number;
+
+        // Only show flags for the currently playing audio
+        if (isPlaying[audioId]) {
+            // Create a new flag element and append it
+            const flagDiv = document.createElement('div');
+            flagDiv.classList.add('flag');
+            flagDiv.innerText = `Flag #${flagNumber}`;
+
+            // Append the new flag to the horizontal list
+            document.getElementById(`flagContainer_${audioId}`).appendChild(flagDiv);
+        }
+    }
+
+    function handleStreamComplete(message) {
+        const audioId = message.audio_id;
+        console.log(`Stream for Audio ${audioId + 1} complete`);
+
+        // After the stream is complete, allow the audio to be replayed
+        isPlaying[audioId] = false; // Reset play state
+    }
+
+    // Function to handle when audio ends
+    function onAudioEnded(audioId) {
+        const audioElement = audioElements[audioId];
+
+        // After the audio ends, reset the flags and allow the audio to be played again
+        clearFlags(audioId);
+
+        // Reset isPlaying to allow replay
+        isPlaying[audioId] = false;
+    }
+
+    // Function to clear flags for this audio
+    function clearFlags(audioId) {
+        const flagContainer = document.getElementById(`flagContainer_${audioId}`);
+        while (flagContainer.firstChild) {
+            flagContainer.removeChild(flagContainer.firstChild);
+        }
+    }
+
+    // Function to reset the audio player for replay
+    function resetAudioPlayer(audioId) {
+        const audioElement = audioElements[audioId];
+
+        // Reset flags for this audio
+        clearFlags(audioId);
+
+        // Reset the playback state and play again
+        audioElement.currentTime = 0; // Reset playback to the start
+        audioElement.play(); // Play the audio again
+        isPlaying[audioId] = true; // Mark it as playing
+    }
+</script>
+
+</body>
+</html>

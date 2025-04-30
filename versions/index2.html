@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Audio Streaming Flags</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.0/socket.io.js"></script>
+    <style>
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            border: 1px solid black;
+            padding: 10px;
+            text-align: left;
+            vertical-align: top;
+        }
+        th {
+            background-color: #f4f4f4;
+        }
+    </style>
+</head>
+<body>
+    <h1>Audio Streaming Flags</h1>
+    <table>
+        <thead>
+            <tr>
+                <th>Audio</th>
+                <th>Flags</th>
+            </tr>
+        </thead>
+        <tbody id="audio-table">
+            <!-- Rows will be dynamically added here -->
+        </tbody>
+    </table>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const socket = io('http://localhost:5000/audio_stream');
+            const audioTable = document.getElementById('audio-table');
+            const sessionRows = {};
+
+            socket.on('connect', function () {
+                console.log('Connected to server.');
+                socket.emit('start_stream', {});  // Automatically trigger the streams on connect
+            });
+
+            socket.on('audio_chunk', function (msg) {
+                const sessionId = msg.session_id;
+
+                // Add rows dynamically for each audio stream
+                if (!sessionRows[sessionId]) {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>Audio ${sessionId + 1}</td>
+                        <td id="flags-${sessionId}"></td>
+                    `;
+                    audioTable.appendChild(row);
+                    sessionRows[sessionId] = document.getElementById(`flags-${sessionId}`);
+                }
+            });
+
+            socket.on('stream_complete', function (msg) {
+                const sessionId = msg.session_id;
+                const flags = msg.flags;
+
+                // Append all flags as a single inline text
+                const flagCell = sessionRows[sessionId];
+                flagCell.innerHTML = '';  // Clear any existing content
+                flagCell.textContent = flags.join(', ');  // Display flags inline, separated by commas
+            });
+
+            socket.on('disconnect', function () {
+                console.log('Disconnected from server.');
+            });
+        });
+    </script>
+</body>
+</html>

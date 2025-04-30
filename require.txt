@@ -1,0 +1,328 @@
+import eventlet
+eventlet.monkey_patch()
+
+from flask import Flask, render_template
+from flask_socketio import SocketIO
+import requests
+import base64
+import threading
+import csv
+import re
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'secret_key'
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+
+audio_urls = []
+
+URL_PATTERN = re.compile(r'^(https?://)')
+
+# Load audio URLs from CSV
+def load_audio_urls():
+    global audio_urls
+    audio_urls = []
+    try:
+        with open('audio_urls.csv', 'r') as file:
+            reader = csv.reader(file)
+            for row in reader:
+                if row and row[0]:
+                    url = row[0].strip()
+                    if URL_PATTERN.match(url):
+                        audio_urls.append(url)
+                    else:
+                        print(f"Ignored invalid URL: {url}")
+        print(f"Loaded {len(audio_urls)} audio URLs.")
+    except Exception as e:
+        print(f"Error loading audio URLs: {e}")
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+# Stream audio chunks
+def stream_audio(audio_url, session_id):
+    try:
+        response = requests.get(audio_url, stream=True, timeout=10)
+        print(f"Starting audio stream for session {session_id}...")
+        chunk_count = 0
+        flags = []
+        for chunk in response.iter_content(chunk_size=1024):
+            if not chunk:
+                continue
+            encoded_chunk = base64.b64encode(chunk).decode('utf-8')
+            chunk_count += 1
+            flag = None
+            if chunk_count % 10 == 0:
+                flag = f"Flag {chunk_count // 10}"
+                flags.append(flag)
+                print(f"Session {session_id}: {flag}")
+
+            socketio.emit(
+                'audio_chunk',
+                {'data': encoded_chunk, 'session_id': session_id, 'flag': flag},
+                namespace='/audio_stream'
+            )
+            eventlet.sleep(0)  # Yield to prevent blocking
+        print(f"Audio streaming complete for session {session_id}.")
+        socketio.emit(
+            'stream_complete',
+            {'session_id': session_id, 'flags': flags},
+            namespace='/audio_stream'
+        )
+    except Exception as e:
+        print(f"Error streaming session {session_id}: {e}")
+
+# Start streaming for all valid audio URLs
+def start_streams():
+    threads = []
+    for i, url in enumerate(audio_urls):
+        thread = threading.Thread(target=stream_audio, args=(url, i))
+        thread.start()
+        threads.append(thread)
+
+@socketio.on('start_stream', namespace='/audio_stream')
+def handle_start_stream(data):
+    load_audio_urls()
+    print(f"Streaming {len(audio_urls)} audio files...")
+    start_streams()
+
+if __name__ == '__main__':
+    socketio.run(app, debug=True)
+
+
+
+#front end 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Audio Streaming Flags</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.0/socket.io.js"></script>
+    <style>
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            border: 1px solid black;
+            padding: 10px;
+            text-align: left;
+            vertical-align: top;
+        }
+        th {
+            background-color: #f4f4f4;
+        }
+    </style>
+</head>
+<body>
+    <h1>Audio Streaming Flags</h1>
+    <table>
+        <thead>
+            <tr>
+                <th>Audio</th>
+                <th>Flags</th>
+            </tr>
+        </thead>
+        <tbody id="audio-table">
+            <!-- Rows will be dynamically added here -->
+        </tbody>
+    </table>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const socket = io('http://localhost:5000/audio_stream');
+            const audioTable = document.getElementById('audio-table');
+            const sessionRows = {};
+
+            socket.on('connect', function () {
+                console.log('[Frontend] Connected to server.');
+                socket.emit('start_stream', {});  // Automatically trigger streams on connect
+            });
+
+            socket.on('audio_chunk', function (msg) {
+                const sessionId = msg.session_id;
+
+                // Add rows dynamically for each audio stream
+                if (!sessionRows[sessionId]) {
+                    const row = document.createElement('tr');
+                    row.id = `row-${sessionId}`;
+                    row.innerHTML = `
+                        <td>Audio ${sessionId + 1}</td>
+                        <td id="flags-${sessionId}">Streaming...</td>
+                    `;
+                    audioTable.appendChild(row);
+                    sessionRows[sessionId] = document.getElementById(`flags-${sessionId}`);
+                    sortTable(); // Sort table rows numerically after appending
+                }
+            });
+
+            socket.on('stream_complete', function (msg) {
+                const sessionId = msg.session_id;
+                const flags = msg.flags;
+
+                // Display all flags for the session
+                const flagCell = sessionRows[sessionId];
+                if (flagCell) {
+                    flagCell.textContent = flags.join(', ');
+                    console.log(`[Frontend] Audio ${sessionId + 1} complete with flags: ${flags.join(', ')}`);
+                }
+            });
+
+            socket.on('disconnect', function () {
+                console.log('[Frontend] Disconnected from server.');
+            });
+
+            // Function to sort rows by their numeric Audio ID
+            function sortTable() {
+                const rows = Array.from(audioTable.querySelectorAll('tr'));
+                rows.sort((a, b) => {
+                    const aId = parseInt(a.id.replace('row-', ''), 10);
+                    const bId = parseInt(b.id.replace('row-', ''), 10);
+                    return aId - bId;
+                });
+                rows.forEach(row => audioTable.appendChild(row)); // Re-append rows in sorted order
+            }
+        });
+    </script>
+</body>
+</html>
+
+
+
+#twilio 
+from flask import Flask, request, jsonify, render_template
+from flask_cors import CORS
+from twilio.rest import Client
+from twilio.twiml.voice_response import VoiceResponse
+
+app = Flask(__name__)
+CORS(app)  # Enable CORS for frontend communication
+
+# Twilio Credentials
+ACCOUNT_SID = "ACf19084c20d4a788ecff01cf8cacd093a"
+AUTH_TOKEN = "238ea904c276e93105434c984524a4e4"
+TWILIO_NUMBER = "+15076051785"
+
+client = Client(ACCOUNT_SID, AUTH_TOKEN)
+
+@app.route("/")
+def index():
+    """Render the frontend page"""
+    return render_template("index.html")
+
+@app.route("/make_call", methods=["POST"])
+def make_call():
+    """API to initiate a call and record it"""
+    data = request.json
+    phone_number = data.get("to")
+
+    if not phone_number:
+        return jsonify({"error": "Phone number is required"}), 400
+
+    try:
+        call = client.calls.create(
+            to=phone_number,
+            from_=TWILIO_NUMBER,
+            url="https://your-ngrok-url.ngrok.io/record_call",  # TwiML URL to record call
+            record=True,  # Forces recording at Twilio's end
+            status_callback="https://your-ngrok-url.ngrok.io/call_status",
+            status_callback_event=["completed"]
+        )
+        return jsonify({"message": "Call initiated", "call_sid": call.sid})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/record_call", methods=["POST"])
+def record_call():
+    """TwiML response to record the call"""
+    response = VoiceResponse()
+    response.say("This call is being recorded.")
+    response.record(timeout=30, transcribe=True, play_beep=True)
+    return str(response)
+
+@app.route("/call_status", methods=["POST"])
+def call_status():
+    """Capture the recording URL when the call ends"""
+    recording_url = request.form.get("RecordingUrl")
+
+    if recording_url:
+        print(f"✅ Call recorded: {recording_url}")
+        return jsonify({"message": "Recording available", "recording_url": recording_url})
+
+    return jsonify({"message": "No recording found"}), 400
+
+@app.route("/get_recordings", methods=["GET"])
+def get_recordings():
+    """Retrieve the latest call recordings"""
+    recordings = client.recordings.list(limit=5)
+
+    recording_data = [
+        {"sid": rec.sid, "url": f"https://api.twilio.com{rec.uri.replace('.json', '.mp3')}"}
+        for rec in recordings
+    ]
+
+    return jsonify({"recordings": recording_data})
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
+
+
+#urls working new
+import asyncio
+import websockets
+import ffmpeg
+import json
+
+AUDIO_URLS = [
+    "https://s3.us-east-1.amazonaws.com/twilio-calls-recordings/recordings/ACab32b204986a87a022a07b5cf4c95e0f/REaf0c60c181e2f36b0be8a20c80056767"
+] * 50  # Example: 50 parallel audio streams
+
+async def stream_audio(websocket):
+    """Streams audio from URLs and sends them over WebSocket."""
+    try:
+        for url in AUDIO_URLS:
+            print(f"Starting stream for {url}")
+            process = (
+                ffmpeg.input(url)
+                .output('pipe:', format='wav', acodec='pcm_s16le')
+                .run_async(pipe_stdout=True, pipe_stderr=True, quiet=True)
+            )
+
+            while True:
+                chunk = process.stdout.read(4096)
+                if not chunk:
+                    break  # End of audio stream
+
+                await websocket.send(chunk)
+                await websocket.send(json.dumps({"flag": "audio_chunk_sent"}))
+
+            process.wait()
+            await websocket.send(json.dumps({"flag": "stream_complete"}))
+        
+    except Exception as e:
+        await websocket.send(json.dumps({"flag": "error", "message": str(e)}))
+        print(f"Error streaming: {e}")
+
+async def main():
+    """Starts the WebSocket server."""
+    print("Starting WebSocket server...")
+
+    # This will start the server without requiring 'path' or 'handler' params
+    server = await websockets.serve(stream_audio, "localhost", 5000)
+    
+    print("WebSocket Server Running on ws://localhost:5000")
+    
+    try:
+        await asyncio.Future()  # Keep the server running
+    except asyncio.CancelledError:
+        print("Shutting down server...")
+
+    finally:
+        server.close()
+        await server.wait_closed()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nServer stopped by user")

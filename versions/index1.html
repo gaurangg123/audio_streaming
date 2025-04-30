@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Audio Stream Debugging</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.0/socket.io.js"></script>
+    <style>
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            border: 1px solid black;
+            padding: 10px;
+            text-align: left;
+            vertical-align: top;
+        }
+        th {
+            background-color: #f4f4f4;
+        }
+        .flag {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: red;
+        }
+    </style>
+</head>
+<body>
+    <h1>Audio Streaming Debugging</h1>
+    <table>
+        <thead>
+            <tr>
+                <th>Audio 1</th>
+                <th>Audio 2</th>
+                <th>Audio 3</th>
+                <th>Audio 4</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td id="audio-0"></td>
+                <td id="audio-1"></td>
+                <td id="audio-2"></td>
+                <td id="audio-3"></td>
+            </tr>
+        </tbody>
+    </table>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const socket = io.connect('http://localhost:5000/audio_stream');
+
+            // Verify connection to the server
+            socket.on('connect', function () {
+                console.log('Connected to the server.');
+                socket.emit('start_stream', {});  // Trigger server-side streams
+            });
+
+            // Listen for audio_chunk events
+            socket.on('audio_chunk', function (msg) {
+                console.log('Received chunk:', msg);
+
+                const sessionId = msg.session_id;
+
+                // Verify and append flag dynamically
+                if (msg.flag) {
+                    console.log(`Appending flag: ${msg.flag} for Audio ${sessionId + 1}`);
+                    appendToColumn(sessionId, msg.flag, 'flag');
+                }
+            });
+
+            // Helper function to append data to respective audio columns
+            function appendToColumn(sessionId, content, className) {
+                const cell = document.getElementById(`audio-${sessionId}`);
+                if (cell) {
+                    const span = document.createElement('span');
+                    span.className = className;
+                    span.textContent = content;
+                    cell.appendChild(span);
+                    cell.appendChild(document.createElement('br')); // Add spacing
+                } else {
+                    console.error(`No cell found for session ${sessionId}`);
+                }
+            }
+
+            socket.on('disconnect', function () {
+                console.log('Disconnected from the server.');
+            });
+        });
+    </script>
+</body>
+</html>
